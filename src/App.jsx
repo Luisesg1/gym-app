@@ -950,19 +950,127 @@ function BodyStatsModal({ stats, onSave, onClose }) {
 // ─── Weekly Planner Modal ─────────────────────────────────────────────────────
 function WeeklyPlannerModal({ plan, onSave, onClose, sessions }) {
   const [mode, setMode] = useState(plan.mode || "weekly");
-  const [weekly, setWeekly] = useState(plan.weekly || { 0:"",1:"",2:"",3:"",4:"",5:"",6:"" });
-  const [cycle, setCycle] = useState(plan.cycle || [{ id: uid(), name: "", label: "" }]);
+  // weekly: { 0: { name:"", exercises:[] }, ... }
+  // Migrate old string format
+  const migrateWeekly = (w) => {
+    if (!w) return {};
+    const out = {};
+    Object.entries(w).forEach(([k, v]) => {
+      if (typeof v === "string") out[k] = { name: v, exercises: [] };
+      else out[k] = v;
+    });
+    return out;
+  };
+  const [weekly, setWeekly] = useState(() => migrateWeekly(plan.weekly));
+  // cycle: [{ id, name, exercises:[] }]
+  const migrateCycle = (c) => {
+    if (!c?.length) return [{ id: uid(), name: "", exercises: [] }];
+    return c.map(d => typeof d === "string"
+      ? { id: uid(), name: d, exercises: [] }
+      : { exercises: [], ...d }
+    );
+  };
+  const [cycle, setCycle] = useState(() => migrateCycle(plan.cycle));
   const [cyclePos, setCyclePos] = useState(plan.cyclePos || 0);
+  const [expandedDay, setExpandedDay] = useState(null); // which day is open for exercise editing
+  const [exMuscle, setExMuscle] = useState("Todos");
+  const [exName, setExName] = useState("");
+  const [exWeight, setExWeight] = useState("");
+  const [exReps, setExReps] = useState("");
+  const [exSets, setExSets] = useState([]);
 
   const workoutNames = [...new Set(sessions.map(s => s.workout).filter(Boolean))];
+  const todayDow = (new Date().getDay() + 6) % 7;
+
+  function addExToDay(dayKey, isWeekly) {
+    const finalName = exName === "__custom__" ? exCustomInput : exName;
+    if (!finalName) return;
+    const sets = exSets.length > 0 ? exSets : (exWeight || exReps ? [{ id: uid(), weight: exWeight, reps: exReps }] : []);
+    const newEx = { id: uid(), name: finalName, sets, weight: exWeight, reps: exReps };
+    if (isWeekly) {
+      setWeekly(w => ({ ...w, [dayKey]: { ...w[dayKey], exercises: [...(w[dayKey]?.exercises||[]), newEx] } }));
+    } else {
+      setCycle(c => c.map((d, i) => i !== dayKey ? d : { ...d, exercises: [...(d.exercises||[]), newEx] }));
+    }
+    setExName(""); setExWeight(""); setExReps(""); setExSets([]);
+  }
+
+  function removeExFromDay(dayKey, exId, isWeekly) {
+    if (isWeekly) {
+      setWeekly(w => ({ ...w, [dayKey]: { ...w[dayKey], exercises: (w[dayKey]?.exercises||[]).filter(e => e.id !== exId) } }));
+    } else {
+      setCycle(c => c.map((d, i) => i !== dayKey ? d : { ...d, exercises: d.exercises.filter(e => e.id !== exId) }));
+    }
+  }
+
+  function addSet() { if (!exReps) return; setExSets(p => [...p, { id: uid(), weight: exWeight, reps: exReps }]); setExWeight(""); setExReps(""); }
+
+  const [exCustomInput, setExCustomInput] = useState("");
+
+  function ExerciseEditor({ dayKey, exercises, isWeekly }) {
+    const filteredDB = exMuscle === "Todos" ? EXERCISE_DB : EXERCISE_DB.filter(e => e.muscle === exMuscle);
+    return (
+      <div style={{ marginTop: 12, padding: "12px 14px", background: "var(--bg)", borderRadius: 10, border: "1px solid var(--border)" }}>
+        <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 2, color: "var(--accent)", textTransform: "uppercase", marginBottom: 10 }}>Ejercicios del día</div>
+        {/* Existing exercises */}
+        {exercises?.length > 0 && (
+          <div style={{ marginBottom: 12 }}>
+            {exercises.map(ex => (
+              <div key={ex.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 10px", background: "var(--input-bg)", borderRadius: 8, marginBottom: 6, border: "1px solid var(--border)" }}>
+                <div>
+                  <span style={{ fontWeight: 600, fontSize: 13 }}>{ex.name}</span>
+                  {ex.sets?.length > 0
+                    ? <span style={{ fontSize: 11, color: "var(--text-muted)", marginLeft: 8 }}>{ex.sets.length} series · {ex.sets.map((s,i)=>`${s.weight}kg×${s.reps}`).join(", ")}</span>
+                    : ex.weight ? <span style={{ fontSize: 11, color: "var(--text-muted)", marginLeft: 8 }}>{ex.weight}kg × {ex.reps} reps</span> : null
+                  }
+                </div>
+                <button className="chip-del" onClick={() => removeExFromDay(dayKey, ex.id, isWeekly)}>✕</button>
+              </div>
+            ))}
+          </div>
+        )}
+        {/* Add exercise */}
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+          {["Todos", ...MUSCLES].map(m => (
+            <button key={m} className={`muscle-chip ${exMuscle===m?"active":""}`} style={{ padding: "3px 9px", fontSize: 11 }} onClick={() => { setExMuscle(m); setExName(""); }}>{m}</button>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 6 }}>
+          <div style={{ flex: 2, minWidth: 140 }}>
+            <select className="input" style={{ fontSize: 12, padding: "7px 10px" }} value={exName} onChange={e => setExName(e.target.value)}>
+              <option value="">— Ejercicio —</option>
+              {filteredDB.map(ex => <option key={ex.name} value={ex.name}>{ex.name}{ex.machine?" 🔧":""}</option>)}
+              <option value="__custom__">✏️ Personalizado...</option>
+            </select>
+            {exName === "__custom__" && <input className="input" style={{ marginTop: 4, fontSize: 12 }} placeholder="Nombre..." value={exCustomInput} onChange={e => setExCustomInput(e.target.value)} />}
+          </div>
+          <div style={{ flex: 1, minWidth: 70 }}>
+            <input className="input" style={{ fontSize: 12, padding: "7px 10px" }} placeholder="Peso kg" value={exWeight} onChange={e => setExWeight(numDot(e.target.value))} />
+          </div>
+          <div style={{ flex: 1, minWidth: 60 }}>
+            <input className="input" style={{ fontSize: 12, padding: "7px 10px" }} placeholder="Reps" value={exReps} onChange={e => setExReps(numDot(e.target.value))} />
+          </div>
+          <button className="btn-ghost small" onClick={addSet}>+ Set</button>
+        </div>
+        {exSets.length > 0 && (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+            {exSets.map((s, i) => (
+              <span key={s.id} className="set-chip">S{i+1}: {s.weight}kg×{s.reps}
+                <button className="chip-del" onClick={() => setExSets(p => p.filter(x => x.id !== s.id))}>×</button>
+              </span>
+            ))}
+          </div>
+        )}
+        <button className="btn-add-ex" style={{ fontSize: 12, padding: "7px" }} onClick={() => addExToDay(dayKey, isWeekly)}>+ Agregar ejercicio</button>
+      </div>
+    );
+  }
 
   function saveCycle() { onSave({ mode, weekly, cycle, cyclePos }); onClose(); }
 
-  const todayDow = (new Date().getDay() + 6) % 7;
-
   return (
     <div className="overlay" onClick={onClose}>
-      <div className="modal modal-wide" onClick={e => e.stopPropagation()}>
+      <div className="modal modal-wide" onClick={e => e.stopPropagation()} style={{ maxHeight: "88vh", overflowY: "auto" }}>
         <div className="modal-header">
           <h3 className="modal-title">📅 Planificador</h3>
           <button className="close-btn" onClick={onClose}>✕</button>
@@ -973,43 +1081,72 @@ function WeeklyPlannerModal({ plan, onSave, onClose, sessions }) {
         </div>
 
         {mode === "weekly" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {DAYS_ES.map((day, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", background: todayDow === i ? "var(--accent-dim)" : "var(--input-bg)", border: `1px solid ${todayDow === i ? "var(--accent)" : "var(--border)"}`, borderRadius: 10 }}>
-                <span style={{ width: 90, fontSize: 13, fontWeight: 600, color: todayDow === i ? "var(--accent)" : "var(--text-muted)", flexShrink: 0 }}>{day}{todayDow === i ? " 📍" : ""}</span>
-                <input className="input" style={{ flex: 1, padding: "7px 12px" }} placeholder="Descanso / Push Day / Piernas…" value={weekly[i] || ""} onChange={e => setWeekly(w => ({ ...w, [i]: e.target.value }))} list={`wk-dl-${i}`} />
-                <datalist id={`wk-dl-${i}`}>{workoutNames.map(n => <option key={n} value={n} />)}</datalist>
-              </div>
-            ))}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {DAYS_ES.map((day, i) => {
+              const dayData = weekly[i] || { name: "", exercises: [] };
+              const isToday = todayDow === i;
+              const isOpen = expandedDay === `w${i}`;
+              return (
+                <div key={i} style={{ background: isToday ? "var(--accent-dim)" : "var(--input-bg)", border: `1px solid ${isToday ? "var(--accent)" : "var(--border)"}`, borderRadius: 12, overflow: "hidden" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px" }}>
+                    <span style={{ width: 90, fontSize: 13, fontWeight: 600, color: isToday ? "var(--accent)" : "var(--text-muted)", flexShrink: 0 }}>{day}{isToday ? " 📍" : ""}</span>
+                    <input className="input" style={{ flex: 1, padding: "7px 12px", fontSize: 13 }} placeholder="Descanso / Push Day / Piernas…" value={dayData.name || ""} onChange={e => setWeekly(w => ({ ...w, [i]: { ...dayData, name: e.target.value } }))} list={`wk-dl-${i}`} />
+                    <datalist id={`wk-dl-${i}`}>{workoutNames.map(n => <option key={n} value={n} />)}{Object.keys(PRESETS).map(n => <option key={n} value={n} />)}</datalist>
+                    <button className="btn-ghost small" style={{ whiteSpace: "nowrap", fontSize: 11 }} onClick={() => setExpandedDay(isOpen ? null : `w${i}`)}>
+                      {isOpen ? "▲ Cerrar" : `💪 ${(dayData.exercises||[]).length > 0 ? `${(dayData.exercises||[]).length} ej.` : "Ejercicios"}`}
+                    </button>
+                  </div>
+                  {isOpen && <ExerciseEditor dayKey={i} exercises={dayData.exercises||[]} isWeekly={true} />}
+                </div>
+              );
+            })}
           </div>
         )}
 
         {mode === "cycle" && (
           <div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
-              {cycle.map((d, i) => (
-                <div key={d.id} style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <span style={{ width: 28, height: 28, borderRadius: "50%", background: cyclePos === i ? "var(--accent)" : "var(--border)", color: "white", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, flexShrink: 0 }}>{i + 1}</span>
-                  <input className="input" style={{ flex: 1, padding: "7px 12px" }} placeholder={`Día ${i+1} (ej: Push Day)`} value={d.name} onChange={e => setCycle(c => c.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} list={`cy-dl-${i}`} />
-                  <datalist id={`cy-dl-${i}`}>{workoutNames.map(n => <option key={n} value={n} />)}</datalist>
-                  {cycle.length > 1 && <button className="chip-del" style={{ fontSize: 18 }} onClick={() => setCycle(c => c.filter((_, j) => j !== i))}>✕</button>}
-                </div>
-              ))}
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+              {cycle.map((d, i) => {
+                const isActive = cyclePos === i;
+                const isOpen = expandedDay === `c${i}`;
+                return (
+                  <div key={d.id} style={{ background: isActive ? "var(--accent-dim)" : "var(--input-bg)", border: `1px solid ${isActive ? "var(--accent)" : "var(--border)"}`, borderRadius: 12, overflow: "hidden" }}>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "10px 14px" }}>
+                      <span style={{ width: 28, height: 28, borderRadius: "50%", background: isActive ? "var(--accent)" : "var(--border)", color: "white", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, flexShrink: 0 }}>{i + 1}</span>
+                      <input className="input" style={{ flex: 1, padding: "7px 12px", fontSize: 13 }} placeholder={`Día ${i+1} (ej: Push Day)`} value={d.name} onChange={e => setCycle(c => c.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} list={`cy-dl-${i}`} />
+                      <datalist id={`cy-dl-${i}`}>{workoutNames.map(n => <option key={n} value={n} />)}{Object.keys(PRESETS).map(n => <option key={n} value={n} />)}</datalist>
+                      <button className="btn-ghost small" style={{ whiteSpace: "nowrap", fontSize: 11 }} onClick={() => setExpandedDay(isOpen ? null : `c${i}`)}>
+                        {isOpen ? "▲ Cerrar" : `💪 ${(d.exercises||[]).length > 0 ? `${(d.exercises||[]).length} ej.` : "Ejercicios"}`}
+                      </button>
+                      {cycle.length > 1 && <button className="chip-del" style={{ fontSize: 16 }} onClick={() => { setCycle(c => c.filter((_, j) => j !== i)); if (cyclePos >= i) setCyclePos(p => Math.max(0, p-1)); }}>✕</button>}
+                    </div>
+                    {isOpen && <ExerciseEditor dayKey={i} exercises={d.exercises||[]} isWeekly={false} />}
+                  </div>
+                );
+              })}
             </div>
-            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-              <button className="btn-ghost small" onClick={() => setCycle(c => [...c, { id: uid(), name: "" }])}>+ Agregar día</button>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
+              <button className="btn-ghost small" onClick={() => setCycle(c => [...c, { id: uid(), name: "", exercises: [] }])}>+ Agregar día</button>
               <div style={{ flex: 1 }} />
-              <span style={{ fontSize: 12, color: "var(--text-muted)", alignSelf: "center" }}>Posición actual:</span>
-              <input className="input" style={{ width: 60, padding: "6px 10px" }} type="number" min={1} max={cycle.length} value={cyclePos + 1} onChange={e => setCyclePos(Math.max(0, Math.min(cycle.length - 1, parseInt(e.target.value) - 1 || 0)))} />
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>Día activo:</span>
+              <div style={{ display: "flex", gap: 4 }}>
+                {cycle.map((_, i) => (
+                  <button key={i} onClick={() => setCyclePos(i)} style={{ width: 28, height: 28, borderRadius: "50%", background: cyclePos === i ? "var(--accent)" : "var(--border)", border: "none", color: "white", fontWeight: 800, fontSize: 12, cursor: "pointer" }}>{i+1}</button>
+                ))}
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", background: "rgba(59,130,246,0.06)", border: "1px solid rgba(59,130,246,0.15)", borderRadius: 8, padding: "8px 12px" }}>
+              💡 Al guardar una sesión, el ciclo avanza automáticamente al siguiente día.
             </div>
           </div>
         )}
 
-        <button className="btn-primary" style={{ width: "100%", marginTop: 12 }} onClick={saveCycle}>💾 Guardar planificador</button>
+        <button className="btn-primary" style={{ width: "100%", marginTop: 16 }} onClick={saveCycle}>💾 Guardar planificador</button>
       </div>
     </div>
   );
 }
+
 
 // ─── Progress Modal ───────────────────────────────────────────────────────────
 function ProgressModal({ exName, sessions, onClose }) {
@@ -2370,8 +2507,9 @@ function Dashboard({ sessions, bodyStats, weeklyGoal, onGoalClick, onBadgesClick
 }
 
 // ─── Session Card ─────────────────────────────────────────────────────────────
-function SessionCard({ s, unit, onDelete, onEdit, onDuplicate, onProgress, onShare, getProgressData, expanded, onToggle, allSessions }) {
+function SessionCard({ s, unit, onDelete, onEdit, onDuplicate, onProgress, onShare, getProgressData, expanded, onToggle, allSessions, onUpdate }) {
   const u = s.unit || unit;
+  const [editingExId, setEditingExId] = useState(null);
 
   // Detect PRs in this session
   const prs = new Set();
@@ -2390,6 +2528,26 @@ function SessionCard({ s, unit, onDelete, onEdit, onDuplicate, onProgress, onSha
     if (sess1RM > prevBest && sessWeight > 0) prs.add(ex.name);
   });
 
+  function updateExField(exId, field, val) {
+    const updated = { ...s, exercises: s.exercises.map(e => e.id === exId ? { ...e, [field]: val } : e) };
+    onUpdate(updated);
+  }
+  function updateSetField(exId, setId, field, val) {
+    const updated = { ...s, exercises: s.exercises.map(e => e.id !== exId ? e : { ...e, sets: e.sets.map(st => st.id === setId ? { ...st, [field]: val } : st) }) };
+    onUpdate(updated);
+  }
+  function addSetToEx(exId) {
+    const ex = s.exercises.find(e => e.id === exId);
+    const lastSet = ex?.sets?.[ex.sets.length - 1];
+    const newSet = { id: uid(), weight: lastSet?.weight || ex?.weight || "", reps: lastSet?.reps || ex?.reps || "" };
+    const updated = { ...s, exercises: s.exercises.map(e => e.id !== exId ? e : { ...e, sets: [...(e.sets || [{ id: uid(), weight: e.weight||"", reps: e.reps||"" }]), newSet] }) };
+    onUpdate(updated);
+  }
+  function removeSetFromEx(exId, setId) {
+    const updated = { ...s, exercises: s.exercises.map(e => e.id !== exId ? e : { ...e, sets: e.sets.filter(st => st.id !== setId) }) };
+    onUpdate(updated);
+  }
+
   return (
     <div className="card session-card">
       <div className="session-header" onClick={onToggle}>
@@ -2406,23 +2564,61 @@ function SessionCard({ s, unit, onDelete, onEdit, onDuplicate, onProgress, onSha
       {expanded && (
         <div className="session-body">
           {s.notes && <p className="session-notes">{s.notes}</p>}
-          {(s.exercises || []).map(ex => (
-            <div key={ex.id} className="ex-row-saved">
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <span className="ex-name">{ex.name}</span>
-                {prs.has(ex.name) && <span style={{ fontSize: 9, background: "rgba(251,191,36,0.15)", color: "#f59e0b", borderRadius: 4, padding: "1px 5px", marginLeft: 6, fontWeight: 800 }}>PR</span>}
-                {ex.sets?.length > 0
-                  ? <><span className="sets-badge">{ex.sets.length} series</span><span className="ex-detail"> {ex.sets.map((st, i) => `S${i+1}: ${st.weight}${u}×${st.reps}`).join(" · ")}</span></>
-                  : ex.weight ? <span className="ex-detail"> — {ex.weight}{u} × {ex.reps}</span> : null}
+          {(s.exercises || []).map(ex => {
+            const isEditing = editingExId === ex.id;
+            const hasMultiSets = ex.sets?.length > 1;
+            const displayWeight = ex.sets?.length > 0 ? ex.sets[0].weight : ex.weight;
+            const displayReps = ex.sets?.length > 0 ? ex.sets[0].reps : ex.reps;
+            return (
+              <div key={ex.id} style={{ borderBottom: "1px solid var(--border)", paddingBottom: 10, marginBottom: 10 }}>
+                {/* Row header */}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, paddingTop: 6 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <span className="ex-name">{ex.name}</span>
+                    {prs.has(ex.name) && <span style={{ fontSize: 9, background: "rgba(251,191,36,0.15)", color: "#f59e0b", borderRadius: 4, padding: "1px 5px", marginLeft: 6, fontWeight: 800 }}>PR</span>}
+                  </div>
+                  <button className="icon-action" title="Ver progreso" onClick={() => onProgress(ex.name)}>📈</button>
+                  <button className="btn-ghost small" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => setEditingExId(isEditing ? null : ex.id)}>
+                    {isEditing ? "✓ Listo" : "✏️ Editar"}
+                  </button>
+                </div>
+
+                {/* View mode: just show summary */}
+                {!isEditing && (
+                  <div style={{ marginTop: 4, fontSize: 12, color: "var(--text-muted)" }}>
+                    {hasMultiSets
+                      ? ex.sets.map((st, i) => <span key={st.id} style={{ marginRight: 10 }}>S{i+1}: <b style={{ color: "var(--text)" }}>{st.weight||"—"}{u}×{st.reps||"—"}</b></span>)
+                      : <span><b style={{ color: (displayWeight && displayWeight !== "0") ? "var(--text)" : "var(--accent)" }}>{(displayWeight && displayWeight !== "0") ? `${displayWeight}${u} × ${displayReps}` : "⚠️ Sin peso/reps — pulsa Editar"}</b></span>
+                    }
+                  </div>
+                )}
+
+                {/* Edit mode */}
+                {isEditing && (
+                  <div style={{ marginTop: 8 }}>
+                    {(hasMultiSets ? ex.sets : [{ id: ex.sets?.[0]?.id || uid(), weight: displayWeight||"", reps: displayReps||"" }]).map((st, i) => (
+                      <div key={st.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                        <span style={{ fontSize: 11, color: "var(--text-muted)", width: 24, flexShrink: 0 }}>S{i+1}</span>
+                        <input className="input" style={{ flex: 1, padding: "6px 10px", fontSize: 13 }} placeholder={`Peso (${u})`} value={st.weight||""} onChange={e => {
+                          if (hasMultiSets) updateSetField(ex.id, st.id, "weight", numDot(e.target.value));
+                          else updateExField(ex.id, "weight", numDot(e.target.value));
+                        }} />
+                        <span style={{ color: "var(--text-muted)" }}>×</span>
+                        <input className="input" style={{ flex: 1, padding: "6px 10px", fontSize: 13 }} placeholder="Reps" value={st.reps||""} onChange={e => {
+                          if (hasMultiSets) updateSetField(ex.id, st.id, "reps", numDot(e.target.value));
+                          else updateExField(ex.id, "reps", numDot(e.target.value));
+                        }} />
+                        {hasMultiSets && ex.sets.length > 1 && <button className="chip-del" onClick={() => removeSetFromEx(ex.id, st.id)}>×</button>}
+                      </div>
+                    ))}
+                    <button className="btn-ghost small" style={{ fontSize: 11, marginTop: 2 }} onClick={() => addSetToEx(ex.id)}>+ Añadir set</button>
+                  </div>
+                )}
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                <Sparkline data={getProgressData(ex.name)} />
-                <button className="icon-action" onClick={() => onProgress(ex.name)}>📈</button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
           <div className="session-actions">
-            <button className="btn-ghost" onClick={() => onEdit(s)}>✏️ Editar</button>
+            <button className="btn-ghost" onClick={() => onEdit(s)}>✏️ Editar sesión</button>
             <button className="btn-ghost" onClick={() => onDuplicate(s)}>📋 Duplicar</button>
             <button className="btn-ghost danger" onClick={() => onDelete(s.id)}>🗑️ Eliminar</button>
           </div>
@@ -2527,7 +2723,7 @@ function GymApp() {
   // Today's planned workout
   const todayDow = (new Date().getDay() + 6) % 7;
   const todayPlanned = weeklyPlan.mode === "weekly"
-    ? weeklyPlan.weekly?.[todayDow] || ""
+    ? (typeof weeklyPlan.weekly?.[todayDow] === "string" ? weeklyPlan.weekly?.[todayDow] : weeklyPlan.weekly?.[todayDow]?.name) || ""
     : weeklyPlan.cycle?.[weeklyPlan.cyclePos]?.name || "";
 
   function handleExName(v) {
@@ -2820,12 +3016,38 @@ function GymApp() {
         {/* Nueva sesión */}
         {activeTab === "new" && (
           <div className="content-area fade-in">
-            {todayPlanned && !editingId && (
-              <div style={{ background: "rgba(59,130,246,0.08)", border: "1px solid rgba(59,130,246,0.25)", borderRadius: 12, padding: "12px 18px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                <span style={{ fontSize: 14, color: "var(--text)" }}>📅 Hoy toca: <b>{todayPlanned}</b></span>
-                <button className="btn-ghost small" onClick={() => setWorkout(todayPlanned)}>Usar esta rutina →</button>
-              </div>
-            )}
+            {todayPlanned && !editingId && (() => {
+              // Get today's exercises from planner if available
+              const todayData = weeklyPlan.mode === "weekly"
+                ? (weeklyPlan.weekly?.[todayDow] || {})
+                : (weeklyPlan.cycle?.[weeklyPlan.cyclePos] || {});
+              const todayExercises = todayData.exercises || [];
+              return (
+                <div style={{ background: "rgba(59,130,246,0.08)", border: "1px solid rgba(59,130,246,0.25)", borderRadius: 12, padding: "12px 18px", marginBottom: 16 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                    <span style={{ fontSize: 14, color: "var(--text)" }}>📅 Hoy toca: <b>{todayPlanned}</b></span>
+                    <button className="btn-ghost small" onClick={() => {
+                      setWorkout(todayPlanned);
+                      if (todayExercises.length > 0) {
+                        setCurrentExercises(todayExercises.map(e => ({ ...e, id: uid() })));
+                        showToast(`✅ ${todayExercises.length} ejercicios cargados`);
+                      }
+                    }}>
+                      {todayExercises.length > 0 ? `💪 Cargar ${todayExercises.length} ejercicios →` : "Usar esta rutina →"}
+                    </button>
+                  </div>
+                  {todayExercises.length > 0 && (
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
+                      {todayExercises.map(ex => (
+                        <span key={ex.id} style={{ fontSize: 11, padding: "3px 9px", background: "rgba(59,130,246,0.1)", border: "1px solid rgba(59,130,246,0.25)", borderRadius: 12, color: "var(--text-muted)" }}>
+                          {ex.name}{ex.sets?.length > 0 ? ` · ${ex.sets.length}s` : ex.weight ? ` · ${ex.weight}kg` : ""}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             {currentExercises.length > 0 && !editingId && (
               <button onClick={() => setShowActiveWorkout(true)} style={{ width:"100%", background:"linear-gradient(135deg,#22c55e,#16a34a)", border:"none", color:"white", borderRadius:12, padding:"14px", fontFamily:"Barlow Condensed, sans-serif", fontSize:20, fontWeight:800, letterSpacing:1, cursor:"pointer", marginBottom:16, display:"flex", alignItems:"center", justifyContent:"center", gap:10 }}>
                 ⚡ MODO ENTRENAMIENTO ACTIVO
@@ -2943,17 +3165,52 @@ function GymApp() {
 
               {currentExercises.length > 0 && (
                 <div className="ex-list">
-                  {currentExercises.map(ex => (
-                    <div key={ex.id} className="ex-row">
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <span className="ex-name">{ex.name}</span>
-                        {ex.sets?.length > 0
-                          ? <><span className="sets-badge">{ex.sets.length} series</span><span className="ex-detail"> {ex.sets.map((s, i) => `S${i+1}: ${s.weight}${unit}×${s.reps}`).join(" · ")}</span></>
-                          : ex.weight ? <span className="ex-detail"> — {ex.weight}{unit} × {ex.reps}</span> : null}
+                  {currentExercises.map(ex => {
+                    const hasMultiSets = ex.sets?.length > 1;
+                    const updateEx = (field, val) => setCurrentExercises(prev => prev.map(e => e.id === ex.id ? { ...e, [field]: val } : e));
+                    const updateSet = (setId, field, val) => setCurrentExercises(prev => prev.map(e => e.id !== ex.id ? e : { ...e, sets: e.sets.map(s => s.id === setId ? { ...s, [field]: val } : s) }));
+                    const addSetToEx = () => setCurrentExercises(prev => prev.map(e => e.id !== ex.id ? e : { ...e, sets: [...(e.sets||[{ id: uid(), weight: e.weight||"", reps: e.reps||"" }]), { id: uid(), weight: e.weight||"", reps: e.reps||"" }] }));
+                    const removeSet = (setId) => setCurrentExercises(prev => prev.map(e => e.id !== ex.id ? e : { ...e, sets: e.sets.filter(s => s.id !== setId) }));
+                    return (
+                      <div key={ex.id} style={{ background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: 10, marginBottom: 8, overflow: "hidden" }}>
+                        {/* Header row */}
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px" }}>
+                          <span className="ex-name" style={{ flex: 1 }}>{ex.name}</span>
+                          <button className="btn-ghost small" style={{ fontSize: 11, padding: "3px 8px" }} onClick={addSetToEx}>+ Set</button>
+                          <button className="chip-del" style={{ fontSize: 16 }} onClick={() => setCurrentExercises(prev => prev.filter(e => e.id !== ex.id))}>✕</button>
+                        </div>
+                        {/* Sets: if multiple sets show each row, else show single weight/reps */}
+                        <div style={{ padding: "0 14px 10px" }}>
+                          {hasMultiSets ? (
+                            ex.sets.map((s, i) => (
+                              <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                                <span style={{ fontSize: 11, color: "var(--text-muted)", width: 24, flexShrink: 0 }}>S{i+1}</span>
+                                <input className="input" style={{ flex: 1, padding: "6px 10px", fontSize: 13 }} placeholder="Peso kg" value={s.weight||""} onChange={e => updateSet(s.id, "weight", numDot(e.target.value))} />
+                                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>×</span>
+                                <input className="input" style={{ flex: 1, padding: "6px 10px", fontSize: 13 }} placeholder="Reps" value={s.reps||""} onChange={e => updateSet(s.id, "reps", numDot(e.target.value))} />
+                                {ex.sets.length > 1 && <button className="chip-del" onClick={() => removeSet(s.id)}>×</button>}
+                              </div>
+                            ))
+                          ) : (
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <input className="input" style={{ flex: 1, padding: "6px 10px", fontSize: 13 }} placeholder={`Peso (${unit})`} value={ex.sets?.[0]?.weight ?? ex.weight ?? ""} onChange={e => {
+                                const v = numDot(e.target.value);
+                                if (ex.sets?.length > 0) updateSet(ex.sets[0].id, "weight", v);
+                                else updateEx("weight", v);
+                              }} />
+                              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>×</span>
+                              <input className="input" style={{ flex: 1, padding: "6px 10px", fontSize: 13 }} placeholder="Reps" value={ex.sets?.[0]?.reps ?? ex.reps ?? ""} onChange={e => {
+                                const v = numDot(e.target.value);
+                                if (ex.sets?.length > 0) updateSet(ex.sets[0].id, "reps", v);
+                                else updateEx("reps", v);
+                              }} />
+                              {ex.weight && ex.reps && <span style={{ fontSize: 11, color: "var(--accent)", whiteSpace: "nowrap" }}>~{calc1RM(ex.weight||ex.sets?.[0]?.weight, ex.reps||ex.sets?.[0]?.reps)}kg 1RM</span>}
+                            </div>
+                          )}
+                        </div>
                       </div>
-                      <button className="chip-del" style={{ fontSize: 16, flexShrink: 0 }} onClick={() => setCurrentExercises(prev => prev.filter(e => e.id !== ex.id))}>✕</button>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -2979,6 +3236,7 @@ function GymApp() {
                   getProgressData={getProgressData}
                   expanded={expanded === s.id} onToggle={() => setExpanded(expanded === s.id ? null : s.id)}
                   allSessions={sessions}
+                  onUpdate={updated => setSessions(prev => prev.map(x => x.id === updated.id ? updated : x))}
                 />
               ))
             }
