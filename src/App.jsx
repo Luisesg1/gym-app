@@ -1,10 +1,43 @@
 import { useState, useEffect, useRef, createContext, useContext } from "react";
+import { initializeApp } from "firebase/app";
+import {
+  getAuth,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged,
+  sendPasswordResetEmail,
+  updateProfile,
+} from "firebase/auth";
+import {
+  getFirestore,
+  doc,
+  getDoc,
+  setDoc,
+  serverTimestamp,
+} from "firebase/firestore";
 
+// ─── Firebase Config ──────────────────────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyAh3pfGv0vEpKmGtNKKRvAhma1pGtA7Alc",
+  authDomain: "gymtracker-app-2c603.firebaseapp.com",
+  projectId: "gymtracker-app-2c603",
+  storageBucket: "gymtracker-app-2c603.firebasestorage.app",
+  messagingSenderId: "1006490404310",
+  appId: "1:1006490404310:web:015b3d4817304032aed077",
+};
+
+const firebaseApp = initializeApp(firebaseConfig);
+const auth = getAuth(firebaseApp);
+const db = getFirestore(firebaseApp);
+
+// ─── Contexts ─────────────────────────────────────────────────────
 const ThemeCtx = createContext();
 const useTheme = () => useContext(ThemeCtx);
 const AuthCtx = createContext();
 const useAuth = () => useContext(AuthCtx);
 
+// ─── Helpers ──────────────────────────────────────────────────────
 const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 const fmtDate = (d) => { if (!d) return ""; const [y, m, day] = d.split("-"); return `${day}/${m}/${y}`; };
 const todayStr = () => new Date().toISOString().slice(0, 10);
@@ -13,6 +46,63 @@ const numDot = (v) => v.replace(/[^0-9.]/g, "");
 const store = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
 const load = (k, def) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : def; } catch { return def; } };
 const DAYS_ES = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"];
+
+// ─── Password Validation ──────────────────────────────────────────
+function validatePassword(pass) {
+  const errors = [];
+  if (pass.length < 8) errors.push("Mínimo 8 caracteres");
+  if (!/[A-Z]/.test(pass)) errors.push("Al menos una mayúscula");
+  if (!/[0-9]/.test(pass)) errors.push("Al menos un número");
+  if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(pass)) errors.push("Al menos un símbolo");
+  return errors;
+}
+
+function PasswordStrengthBar({ password }) {
+  if (!password) return null;
+  const errors = validatePassword(password);
+  const score = 4 - errors.length;
+  const colors = ["#ef4444", "#f97316", "#eab308", "#22c55e"];
+  const labels = ["Muy débil", "Débil", "Buena", "Fuerte"];
+  const color = score > 0 ? colors[score - 1] : "#ef4444";
+  const label = score > 0 ? labels[score - 1] : "Muy débil";
+  return (
+    <div style={{ marginTop: 6 }}>
+      <div style={{ display: "flex", gap: 4, marginBottom: 4 }}>
+        {[1,2,3,4].map(i => (
+          <div key={i} style={{
+            flex: 1, height: 4, borderRadius: 2,
+            background: i <= score ? color : "var(--border)",
+            transition: "background 0.3s"
+          }} />
+        ))}
+      </div>
+      <div style={{ fontSize: 11, color }}>
+        {label}
+        {errors.length > 0 && (
+          <span style={{ color: "var(--text-muted)", marginLeft: 8 }}>
+            · Falta: {errors.join(", ")}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Firebase Error Translator ────────────────────────────────────
+function firebaseErrMsg(code) {
+  const map = {
+    "auth/email-already-in-use":   "Este email ya está registrado",
+    "auth/invalid-email":          "Email inválido",
+    "auth/weak-password":          "Contraseña muy débil",
+    "auth/user-not-found":         "Email o contraseña incorrectos",
+    "auth/wrong-password":         "Email o contraseña incorrectos",
+    "auth/invalid-credential":     "Email o contraseña incorrectos",
+    "auth/too-many-requests":      "Demasiados intentos. Resetea tu contraseña.",
+    "auth/network-request-failed": "Sin conexión a internet",
+    "auth/user-disabled":          "Esta cuenta ha sido deshabilitada",
+  };
+  return map[code] || "Ocurrió un error. Intenta de nuevo.";
+}
 
 const PLANS = {
   guest: { name: "Invitado", price: "Sin cuenta", color: "#f59e0b", features: ["3 sesiones", "Sin historial guardado", "Herramientas básicas"] },
@@ -1451,39 +1541,180 @@ function TeamsModal({ user, sessions, onClose }) {
 
 // ─── Login ────────────────────────────────────────────────────────────────────
 function LoginScreen() {
-  const { login, register, loginAsGuest } = useAuth();
-  const [mode, setMode] = useState("login");
+  const { loginWithFirebase, registerWithFirebase, loginAsGuest, resetPassword } = useAuth();
+  const [mode, setMode] = useState("login"); // login | register | forgot
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [pass, setPass] = useState("");
+  const [confirmPass, setConfirmPass] = useState("");
+  const [showPass, setShowPass] = useState(false);
   const [err, setErr] = useState("");
-  function submit() {
-    setErr("");
+  const [msg, setMsg] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function submit() {
+    setErr(""); setMsg("");
+    if (mode === "forgot") {
+      if (!email) { setErr("Ingresa tu email"); return; }
+      setLoading(true);
+      const result = await resetPassword(email);
+      setLoading(false);
+      if (result.ok) setMsg("✅ Revisa tu correo para restablecer la contraseña.");
+      else setErr(result.msg);
+      return;
+    }
     if (!email || !pass) { setErr("Completa todos los campos"); return; }
-    if (mode === "register" && !name) { setErr("Ingresa tu nombre"); return; }
-    const result = mode === "login" ? login(email, pass) : register(name, email, pass);
-    if (!result.ok) setErr(result.msg);
+    if (mode === "register") {
+      if (!name.trim()) { setErr("Ingresa tu nombre"); return; }
+      const passErrors = validatePassword(pass);
+      if (passErrors.length > 0) { setErr("La contraseña no cumple los requisitos"); return; }
+      if (pass !== confirmPass) { setErr("Las contraseñas no coinciden"); return; }
+      setLoading(true);
+      const result = await registerWithFirebase(name.trim(), email, pass);
+      setLoading(false);
+      if (!result.ok) setErr(result.msg);
+    } else {
+      setLoading(true);
+      const result = await loginWithFirebase(email, pass);
+      setLoading(false);
+      if (!result.ok) setErr(result.msg);
+    }
   }
+
+  function switchMode(m) { setMode(m); setErr(""); setMsg(""); }
+
   return (
     <div className="login-page">
       <div className="login-box">
-        <div className="login-logo"><span style={{ fontSize: 36 }}>⚡</span><span className="logo-text">GymTracker</span></div>
-        <p className="text-muted" style={{ marginBottom: 28, fontSize: 14 }}>Tu entrenamiento. Tu progreso.</p>
-        <div className="tab-row">
-          <button className={`tab-btn ${mode === "login" ? "active" : ""}`} onClick={() => setMode("login")}>Iniciar sesión</button>
-          <button className={`tab-btn ${mode === "register" ? "active" : ""}`} onClick={() => setMode("register")}>Registrarse</button>
+        <div className="login-logo">
+          <span style={{ fontSize: 36 }}>⚡</span>
+          <span className="logo-text">GymTracker</span>
         </div>
-        {mode === "register" && <div className="field"><label className="field-label">Nombre</label><input className="input" placeholder="Tu nombre" value={name} onChange={e => setName(e.target.value)} /></div>}
-        <div className="field"><label className="field-label">Email</label><input className="input" type="email" placeholder="email@ejemplo.com" value={email} onChange={e => setEmail(e.target.value)} /></div>
-        <div className="field"><label className="field-label">Contraseña</label><input className="input" type="password" placeholder="••••••••" value={pass} onChange={e => setPass(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} /></div>
-        {err && <div className="err-msg">{err}</div>}
-        <button className="btn-primary" style={{ width: "100%", marginTop: 8 }} onClick={submit}>{mode === "login" ? "Entrar" : "Crear cuenta"}</button>
-        <p className="text-muted" style={{ fontSize: 13, textAlign: "center", marginTop: 14 }}>
-          {mode === "login" ? "¿No tienes cuenta? " : "¿Ya tienes cuenta? "}
-          <button className="link-btn" onClick={() => { setMode(mode === "login" ? "register" : "login"); setErr(""); }}>{mode === "login" ? "Regístrate" : "Inicia sesión"}</button>
+        <p className="text-muted" style={{ marginBottom: 20, fontSize: 14 }}>
+          Tu entrenamiento. Tu progreso.
         </p>
+
+        {mode !== "forgot" && (
+          <div className="tab-row" style={{ marginBottom: 20 }}>
+            <button className={`tab-btn ${mode === "login" ? "active" : ""}`} onClick={() => switchMode("login")}>Iniciar sesión</button>
+            <button className={`tab-btn ${mode === "register" ? "active" : ""}`} onClick={() => switchMode("register")}>Registrarse</button>
+          </div>
+        )}
+
+        {mode === "forgot" && (
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontFamily: "Barlow Condensed,sans-serif", fontSize: 20, fontWeight: 700, marginBottom: 6 }}>
+              🔑 Recuperar contraseña
+            </div>
+            <p style={{ fontSize: 13, color: "var(--text-muted)" }}>
+              Te enviaremos un enlace para restablecer tu contraseña.
+            </p>
+          </div>
+        )}
+
+        {mode === "register" && (
+          <div className="field">
+            <label className="field-label">Nombre</label>
+            <input className="input" placeholder="Tu nombre" value={name} onChange={e => setName(e.target.value)} />
+          </div>
+        )}
+
+        <div className="field">
+          <label className="field-label">Email</label>
+          <input className="input" type="email" placeholder="email@ejemplo.com" value={email} onChange={e => setEmail(e.target.value)} autoComplete="email" />
+        </div>
+
+        {mode !== "forgot" && (
+          <div className="field">
+            <label className="field-label">Contraseña</label>
+            <div style={{ position: "relative" }}>
+              <input
+                className="input"
+                type={showPass ? "text" : "password"}
+                placeholder="••••••••"
+                value={pass}
+                onChange={e => setPass(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && !confirmPass && submit()}
+                style={{ paddingRight: 44 }}
+                autoComplete={mode === "login" ? "current-password" : "new-password"}
+              />
+              <button onClick={() => setShowPass(v => !v)} style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", fontSize: 16, color: "var(--text-muted)" }}>
+                {showPass ? "🙈" : "👁️"}
+              </button>
+            </div>
+            {mode === "register" && <PasswordStrengthBar password={pass} />}
+          </div>
+        )}
+
+        {mode === "register" && (
+          <>
+            <div className="field">
+              <label className="field-label">Confirmar contraseña</label>
+              <input
+                className="input"
+                type={showPass ? "text" : "password"}
+                placeholder="••••••••"
+                value={confirmPass}
+                onChange={e => setConfirmPass(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && submit()}
+                autoComplete="new-password"
+              />
+              {confirmPass && pass !== confirmPass && (
+                <div style={{ fontSize: 11, color: "#ef4444", marginTop: 4 }}>Las contraseñas no coinciden</div>
+              )}
+            </div>
+            <div style={{ background: "rgba(59,130,246,0.06)", border: "1px solid rgba(59,130,246,0.2)", borderRadius: 10, padding: "10px 14px", marginBottom: 12, fontSize: 12, lineHeight: 1.8 }}>
+              <div style={{ fontWeight: 700, color: "var(--accent)", marginBottom: 4 }}>🔒 Requisitos:</div>
+              {[
+                ["Mínimo 8 caracteres",        pass.length >= 8],
+                ["Al menos una mayúscula (A-Z)", /[A-Z]/.test(pass)],
+                ["Al menos un número (0-9)",    /[0-9]/.test(pass)],
+                ["Al menos un símbolo (!@#$%...)", /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(pass)],
+              ].map(([req, ok]) => (
+                <div key={req} style={{ color: ok ? "#22c55e" : "var(--text-muted)", display: "flex", gap: 6 }}>
+                  <span>{ok ? "✓" : "○"}</span> {req}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        {err && <div className="err-msg">{err}</div>}
+        {msg && (
+          <div style={{ background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.3)", color: "#22c55e", borderRadius: 8, padding: "9px 12px", fontSize: 13, marginBottom: 10 }}>
+            {msg}
+          </div>
+        )}
+
+        <button className="btn-primary" style={{ width: "100%", marginTop: 8 }} onClick={submit} disabled={loading}>
+          {loading ? "⏳ Cargando..." : mode === "login" ? "Entrar" : mode === "register" ? "Crear cuenta" : "Enviar enlace"}
+        </button>
+
+        {mode === "login" && (
+          <p style={{ textAlign: "center", marginTop: 10, fontSize: 13 }}>
+            <button className="link-btn" onClick={() => switchMode("forgot")} style={{ color: "var(--text-muted)" }}>
+              ¿Olvidaste tu contraseña?
+            </button>
+          </p>
+        )}
+        {mode === "forgot" && (
+          <p style={{ textAlign: "center", marginTop: 10, fontSize: 13 }}>
+            <button className="link-btn" onClick={() => switchMode("login")}>← Volver al inicio de sesión</button>
+          </p>
+        )}
+        {mode !== "forgot" && (
+          <p className="text-muted" style={{ fontSize: 13, textAlign: "center", marginTop: 14 }}>
+            {mode === "login" ? "¿No tienes cuenta? " : "¿Ya tienes cuenta? "}
+            <button className="link-btn" onClick={() => switchMode(mode === "login" ? "register" : "login")}>
+              {mode === "login" ? "Regístrate" : "Inicia sesión"}
+            </button>
+          </p>
+        )}
+
         <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "20px 0 16px" }}>
-          <div style={{ flex: 1, height: 1, background: "var(--border)" }} /><span style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 600 }}>O</span><div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+          <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+          <span style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 600 }}>O</span>
+          <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
         </div>
         <button className="btn-guest" onClick={loginAsGuest}>
           <span style={{ fontSize: 18 }}>👤</span>
@@ -1621,11 +1852,24 @@ function GymApp() {
   const { dark, toggleDark } = useTheme();
   const { user, logout } = useAuth();
 
-  const storageKey = `gym_v3_${user.email}`;
-  const [sessions, setSessions] = useState(() => load(storageKey, []));
-  const [unit, setUnit] = useState(() => load("gym_unit", "kg"));
-  const [activeTab, setActiveTab] = useState("new");
-  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [sessions, setSessions] = useState([]);
+const [sessionsLoading, setSessionsLoading] = useState(true);
+
+useEffect(() => {
+  if (user.isGuest) {
+    setSessions(load("gym_v3_guest", []));
+    setSessionsLoading(false);
+    return;
+  }
+  getDoc(doc(db, "sessions", user.uid)).then(snap => {
+    setSessions(snap.exists() ? (snap.data().list || []) : []);
+    setSessionsLoading(false);
+  });
+}, [user.uid]);
+
+const [unit, setUnit] = useState(() => load("gym_unit", "kg"));
+const [activeTab, setActiveTab] = useState("new");
+const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   const bodyKey = `gym_body_${user.email}`;
   const [bodyStats, setBodyStats] = useState(() => load(bodyKey, { height: null, entries: [] }));
@@ -1666,7 +1910,11 @@ function GymApp() {
   const [toast, setToast] = useState(null);
   const presetRef = useRef();
 
-  useEffect(() => { store(storageKey, sessions); }, [sessions]);
+  useEffect(() => {
+  if (sessionsLoading) return;
+  if (user.isGuest) { store("gym_v3_guest", sessions); return; }
+  setDoc(doc(db, "sessions", user.uid), { list: sessions, updatedAt: serverTimestamp() });
+}, [sessions]);
   useEffect(() => { store("gym_unit", unit); }, [unit]);
   useEffect(() => { store(bodyKey, bodyStats); }, [bodyStats]);
   useEffect(() => { store(plannerKey, weeklyPlan); }, [weeklyPlan]);
@@ -2015,8 +2263,8 @@ function GymApp() {
 // ─── Root ─────────────────────────────────────────────────────────────────────
 export default function App() {
   const [dark, setDark] = useState(() => load("gym_dark", true));
-  const [users, setUsers] = useState(() => load("gym_users", []));
-  const [currentUser, setCurrentUser] = useState(() => load("gym_current_user", null));
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
 
   useEffect(() => {
     const saved = localStorage.getItem("gym_dark");
@@ -2024,28 +2272,78 @@ export default function App() {
   }, []);
   useEffect(() => { document.body.setAttribute("data-theme", dark ? "dark" : "light"); }, [dark]);
   useEffect(() => { store("gym_dark", dark); }, [dark]);
-  useEffect(() => { store("gym_users", users); }, [users]);
-  useEffect(() => { store("gym_current_user", currentUser); }, [currentUser]);
+
+  // Firebase escucha cambios de sesión automáticamente
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        let profile = null;
+        try {
+          const snap = await getDoc(doc(db, "users", firebaseUser.uid));
+          profile = snap.exists() ? snap.data() : null;
+        } catch {}
+        if (!profile) {
+          profile = { uid: firebaseUser.uid, name: firebaseUser.displayName || firebaseUser.email.split("@")[0], email: firebaseUser.email, plan: "free" };
+          try { await setDoc(doc(db, "users", firebaseUser.uid), profile, { merge: true }); } catch {}
+        }
+        setCurrentUser({
+          uid: firebaseUser.uid,
+          name: profile.name || firebaseUser.displayName || firebaseUser.email.split("@")[0],
+          email: firebaseUser.email,
+          plan: "free",
+        });
+      } else {
+        setCurrentUser(null);
+      }
+      setAuthLoading(false);
+    });
+    return unsub;
+  }, []);
 
   const toggleDark = () => setDark(d => !d);
 
-  function login(email, pass) {
-    const u = users.find(u => u.email === email && u.pass === pass);
-    if (!u) return { ok: false, msg: "Email o contraseña incorrectos" };
-    setCurrentUser(u); return { ok: true };
+  async function loginWithFirebase(email, pass) {
+    try { await signInWithEmailAndPassword(auth, email, pass); return { ok: true }; }
+    catch (e) { return { ok: false, msg: firebaseErrMsg(e.code) }; }
   }
-  function register(name, email, pass) {
-    if (users.find(u => u.email === email)) return { ok: false, msg: "Email ya registrado" };
-    const u = { id: uid(), name, email, pass, plan: "free" };
-    setUsers(prev => [...prev, u]); setCurrentUser(u); return { ok: true };
+
+  async function registerWithFirebase(name, email, pass) {
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, email, pass);
+      await updateProfile(cred.user, { displayName: name });
+      await setDoc(doc(db, "users", cred.user.uid), { uid: cred.user.uid, name, email, plan: "free" }, { merge: true });
+      return { ok: true };
+    } catch (e) { return { ok: false, msg: firebaseErrMsg(e.code) }; }
   }
-  function loginAsGuest() { setCurrentUser({ id: "guest", name: "Invitado", email: "__guest__", plan: "guest", isGuest: true }); }
-  function logout() { setCurrentUser(null); }
-  function updatePlan(plan) { const updated = { ...currentUser, plan }; setUsers(prev => prev.map(u => u.id === currentUser.id ? updated : u)); setCurrentUser(updated); }
+
+  async function resetPassword(email) {
+    try { await sendPasswordResetEmail(auth, email); return { ok: true }; }
+    catch (e) { return { ok: false, msg: firebaseErrMsg(e.code) }; }
+  }
+
+  function loginAsGuest() {
+    setCurrentUser({ uid: "guest", name: "Invitado", email: "__guest__", plan: "guest", isGuest: true });
+    setAuthLoading(false);
+  }
+
+  async function logout() {
+    if (currentUser?.isGuest) { setCurrentUser(null); return; }
+    await signOut(auth);
+    setCurrentUser(null);
+  }
+
+  if (authLoading) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#080f1a", flexDirection: "column", gap: 16 }}>
+        <div style={{ fontFamily: "Barlow Condensed,sans-serif", fontSize: 32, fontWeight: 800, color: "#3b82f6", letterSpacing: 2 }}>⚡ GymTracker</div>
+        <div style={{ color: "#4a6080", fontSize: 14 }}>Iniciando...</div>
+      </div>
+    );
+  }
 
   return (
     <ThemeCtx.Provider value={{ dark, toggleDark }}>
-      <AuthCtx.Provider value={{ user: currentUser, login, register, logout, updatePlan, loginAsGuest }}>
+      <AuthCtx.Provider value={{ user: currentUser, loginWithFirebase, registerWithFirebase, logout, loginAsGuest, resetPassword }}>
         <style>{CSS}</style>
         {!currentUser ? <LoginScreen /> : <GymApp />}
       </AuthCtx.Provider>
