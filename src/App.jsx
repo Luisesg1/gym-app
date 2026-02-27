@@ -1606,32 +1606,89 @@ function TeamsModal({ user, sessions, onClose }) {
   const [activeTeam, setActiveTeam] = useState(null);
   const [teamData, setTeamData] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [teamPreviews, setTeamPreviews] = useState({});
   const [createName, setCreateName] = useState("");
   const [joinCode, setJoinCode] = useState("");
+  const [joinPreview, setJoinPreview] = useState(null);  // team preview before joining
+  const [joinPreviewing, setJoinPreviewing] = useState(false);
   const [err, setErr] = useState("");
   const [rankMetric, setRankMetric] = useState("volume");
 
   function saveMyTeams(t) { setMyTeams(t); store(`gym_teams_${user.email}`, t); }
 
+  async function previewJoin(code) {
+    const c = code.trim().toUpperCase();
+    if (c.length < 4) { setJoinPreview(null); return; }
+    if (myTeams.find(t => t.code === c)) { setErr("Ya eres miembro de este equipo"); setJoinPreview(null); return; }
+    setJoinPreviewing(true);
+    setErr("");
+    const data = await teamsGet(`team_${c}`);
+    setJoinPreviewing(false);
+    if (data) { setJoinPreview(data); }
+    else { setJoinPreview(null); }
+  }
+
+  // Load member previews for all my teams on mount
+  useEffect(() => {
+    const savedTeams = load(`gym_teams_${user.email}`, []);
+    savedTeams.forEach(async t => {
+      const data = await teamsGet(`team_${t.code}`);
+      setTeamPreviews(prev => ({ ...prev, [t.code]: data || null }));
+    });
+  }, []);
+
   // Stats for this user
-  const myStats = {
-    name: user.name,
-    email: user.email,
-    sessions: sessions.length,
-    volume: Math.round(sessions.reduce((acc,s) => acc+(s.exercises||[]).reduce((a,ex)=>{
-      const w = ex.sets?.length>0 ? ex.sets.reduce((sum,st)=>(parseFloat(st.weight)||0)*(parseFloat(st.reps)||1)+sum,0) : (parseFloat(ex.weight)||0)*(parseFloat(ex.reps)||1);
-      return a+w;
-    },0),0)/1000 * 10)/10,
-    prs: (() => {
-      const p={}; sessions.forEach(s=>(s.exercises||[]).forEach(ex=>{
-        const w=ex.sets?.length>0?Math.max(...ex.sets.map(st=>parseFloat(st.weight)||0)):parseFloat(ex.weight)||0;
-        const r=ex.sets?.length>0?Math.max(...ex.sets.map(st=>parseFloat(st.reps)||0)):parseFloat(ex.reps)||0;
-        const rm=calc1RM(w,r); if(!p[ex.name]||rm>p[ex.name])p[ex.name]=rm;
-      })); return Object.keys(p).length;
-    })(),
-    streak: getStreak(sessions),
-    lastUpdate: todayStr(),
-  };
+  const myStats = (() => {
+    const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
+    const twoWeeksAgo = new Date(); twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
+
+    // Best 1RM per exercise this week and last week
+    const thisWeekRMs = {}, lastWeekRMs = {};
+    sessions.forEach(s => {
+      const d = new Date(s.date + "T00:00:00");
+      const isThisWeek = d >= weekAgo;
+      const isLastWeek = d >= twoWeeksAgo && d < weekAgo;
+      (s.exercises||[]).forEach(ex => {
+        const w = ex.sets?.length>0?Math.max(...ex.sets.map(st=>parseFloat(st.weight)||0)):parseFloat(ex.weight)||0;
+        const r = ex.sets?.length>0?Math.max(...ex.sets.map(st=>parseFloat(st.reps)||0)):parseFloat(ex.reps)||0;
+        const rm = calc1RM(w,r);
+        if (rm <= 0) return;
+        if (isThisWeek) thisWeekRMs[ex.name] = Math.max(thisWeekRMs[ex.name]||0, rm);
+        if (isLastWeek) lastWeekRMs[ex.name] = Math.max(lastWeekRMs[ex.name]||0, rm);
+      });
+    });
+
+    // Weekly progress: avg % improvement across exercises trained this week
+    const improvements = Object.entries(thisWeekRMs)
+      .filter(([name]) => lastWeekRMs[name] > 0)
+      .map(([name, rm]) => ({ name, pct: Math.round(((rm - lastWeekRMs[name]) / lastWeekRMs[name]) * 1000) / 10 }));
+    const weeklyProgress = improvements.length > 0
+      ? Math.round(improvements.reduce((s,i) => s+i.pct, 0) / improvements.length * 10) / 10
+      : 0;
+    const bestImprovement = improvements.sort((a,b) => b.pct-a.pct)[0] || null;
+
+    return {
+      name: user.name,
+      email: user.email,
+      sessions: sessions.length,
+      volume: Math.round(sessions.reduce((acc,s) => acc+(s.exercises||[]).reduce((a,ex)=>{
+        const w = ex.sets?.length>0 ? ex.sets.reduce((sum,st)=>(parseFloat(st.weight)||0)*(parseFloat(st.reps)||1)+sum,0) : (parseFloat(ex.weight)||0)*(parseFloat(ex.reps)||1);
+        return a+w;
+      },0),0)/1000 * 10)/10,
+      prs: (() => {
+        const p={}; sessions.forEach(s=>(s.exercises||[]).forEach(ex=>{
+          const w=ex.sets?.length>0?Math.max(...ex.sets.map(st=>parseFloat(st.weight)||0)):parseFloat(ex.weight)||0;
+          const r=ex.sets?.length>0?Math.max(...ex.sets.map(st=>parseFloat(st.reps)||0)):parseFloat(ex.reps)||0;
+          const rm=calc1RM(w,r); if(!p[ex.name]||rm>p[ex.name])p[ex.name]=rm;
+        })); return Object.keys(p).length;
+      })(),
+      streak: getStreak(sessions),
+      weeklyProgress,           // avg % improvement this week vs last
+      bestImprovement,          // { name, pct } of top exercise
+      thisWeekSessions: sessions.filter(s => new Date(s.date+"T00:00:00") >= weekAgo).length,
+      lastUpdate: todayStr(),
+    };
+  })();
 
   async function loadTeam(code) {
     setLoading(true);
@@ -1646,8 +1703,10 @@ function TeamsModal({ user, sessions, onClose }) {
     const code = Math.random().toString(36).slice(2,8).toUpperCase();
     const team = { code, name: createName.trim(), createdBy: user.name, members: { [user.email]: myStats }, createdAt: todayStr() };
     await teamsSet(`team_${code}`, team);
-    saveMyTeams([...myTeams, { code, name: createName.trim() }]);
-    setActiveTeam({ code, name: createName.trim() });
+    const newTeam = { code, name: createName.trim() };
+    saveMyTeams([...myTeams, newTeam]);
+    setTeamPreviews(prev => ({ ...prev, [code]: team }));
+    setActiveTeam(newTeam);
     await loadTeam(code);
     setTab("team");
     setCreateName("");
@@ -1669,6 +1728,7 @@ function TeamsModal({ user, sessions, onClose }) {
     setTeamData(updated);
     setTab("team");
     setJoinCode("");
+    setJoinPreview(null);
     setErr("");
   }
 
@@ -1690,13 +1750,45 @@ function TeamsModal({ user, sessions, onClose }) {
     setTab("team");
   }
 
+  async function leaveTeam(code) {
+    if (!window.confirm("¿Seguro que quieres salir de este equipo?")) return;
+    setLoading(true);
+    try {
+      const data = await teamsGet(`team_${code}`);
+      if (data) {
+        const updated = { ...data, members: { ...data.members } };
+        delete updated.members[user.email];
+        await teamsSet(`team_${code}`, updated);
+      }
+    } catch(e) {}
+    const updated = myTeams.filter(t => t.code !== code);
+    saveMyTeams(updated);
+    setTeamPreviews(prev => { const n = {...prev}; delete n[code]; return n; });
+    if (activeTeam?.code === code) { setActiveTeam(null); setTeamData(null); setTab("home"); }
+    setLoading(false);
+  }
+
+  // Refresh preview for a specific team
+  async function refreshPreview(code) {
+    const data = await teamsGet(`team_${code}`);
+    setTeamPreviews(prev => ({ ...prev, [code]: data || null }));
+    if (teamData && activeTeam?.code === code) setTeamData(data);
+  }
+
   const members = teamData ? Object.values(teamData.members) : [];
   const sorted = [...members].sort((a,b) => {
     if (rankMetric === "volume") return b.volume - a.volume;
     if (rankMetric === "sessions") return b.sessions - a.sessions;
     if (rankMetric === "prs") return b.prs - a.prs;
+    if (rankMetric === "progress") return (b.weeklyProgress||0) - (a.weeklyProgress||0);
     return b.streak - a.streak;
   });
+
+  // Weekly champion = highest weeklyProgress among members with data this week
+  const eligibleForChamp = members.filter(m => (m.weeklyProgress||0) > 0 || (m.thisWeekSessions||0) > 0);
+  const weeklyChamp = eligibleForChamp.length > 0
+    ? eligibleForChamp.reduce((best, m) => (m.weeklyProgress||0) > (best.weeklyProgress||0) ? m : best, eligibleForChamp[0])
+    : null;
 
   const medals = ["🥇","🥈","🥉"];
 
@@ -1719,89 +1811,331 @@ function TeamsModal({ user, sessions, onClose }) {
 
         {tab === "home" && (
           <div>
-            {/* My teams */}
-            {myTeams.length > 0 && (
-              <div style={{ marginBottom:24 }}>
-                <div style={{ fontSize:10, fontWeight:700, letterSpacing:2, color:"var(--accent)", textTransform:"uppercase", marginBottom:12 }}>Mis Teams</div>
-                {myTeams.map(t => (
-                  <div key={t.code} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"12px 14px", background:"var(--input-bg)", border:"1px solid var(--border)", borderRadius:10, marginBottom:8 }}>
-                    <div>
-                      <div style={{ fontWeight:700, fontSize:14 }}>{t.name}</div>
-                      <div style={{ fontSize:11, color:"var(--text-muted)", fontFamily:"monospace" }}>#{t.code}</div>
-                    </div>
-                    <button className="btn-ghost small" onClick={() => openTeam(t)}>Ver ranking →</button>
+            {/* Guest wall */}
+            {user.isGuest ? (
+              <div style={{ textAlign:"center", padding:"20px 0" }}>
+                <div style={{ fontSize:52, marginBottom:12 }}>🔒</div>
+                <div style={{ fontFamily:"Barlow Condensed, sans-serif", fontSize:24, fontWeight:800, marginBottom:8 }}>Cuenta requerida</div>
+                <p style={{ fontSize:14, color:"var(--text-muted)", marginBottom:20, lineHeight:1.6 }}>
+                  Para crear o unirte a un GymTeam necesitas una cuenta registrada.<br/>
+                  Así tu historial y ranking quedan guardados permanentemente.
+                </p>
+                <button className="btn-primary" style={{ fontSize:16, padding:"12px 28px" }} onClick={onClose}>
+                  Crear cuenta gratis →
+                </button>
+                <p style={{ fontSize:12, color:"var(--text-muted)", marginTop:12 }}>Ya tienes cuenta? Cierra sesión e inicia con tu email.</p>
+              </div>
+            ) : (
+              <>
+                {/* My teams */}
+                {myTeams.length > 0 && (
+                  <div style={{ marginBottom:24 }}>
+                    <div style={{ fontSize:10, fontWeight:700, letterSpacing:2, color:"var(--accent)", textTransform:"uppercase", marginBottom:12 }}>Mis Teams ({myTeams.length})</div>
+                    {myTeams.map(t => {
+                      const cached = teamPreviews[t.code];
+                      const memberList = cached ? Object.values(cached.members || {}) : [];
+                      return (
+                        <div key={t.code} style={{ background:"var(--input-bg)", border:"1px solid var(--border)", borderRadius:12, marginBottom:10, overflow:"hidden" }}>
+                          {/* Header */}
+                          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"14px 16px" }}>
+                            <div>
+                              <div style={{ fontWeight:700, fontSize:15 }}>{t.name}</div>
+                              <div style={{ fontSize:11, color:"var(--text-muted)", fontFamily:"monospace", marginTop:2 }}>
+                                Código: <span style={{ color:"var(--accent)", letterSpacing:2, fontWeight:700 }}>{t.code}</span>
+                              </div>
+                            </div>
+                            <div style={{ display:"flex", gap:6 }}>
+                          <button className="btn-ghost small" onClick={() => openTeam(t)}>Ver ranking →</button>
+                          <button className="btn-ghost small danger" onClick={() => leaveTeam(t.code)}>🚪</button>
+                        </div>
+                          </div>
+                          {/* Members preview */}
+                          {memberList.length > 0 && (
+                            <div style={{ borderTop:"1px solid var(--border)", padding:"10px 16px", background:"rgba(59,130,246,0.03)" }}>
+                              <div style={{ fontSize:10, fontWeight:700, letterSpacing:1, color:"var(--text-muted)", textTransform:"uppercase", marginBottom:8 }}>
+                                {memberList.length} miembro{memberList.length !== 1 ? "s" : ""}
+                              </div>
+                              <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                                {memberList.map(m => {
+                                  const isMe = m.email === user.email;
+                                  return (
+                                    <div key={m.email} style={{ display:"flex", alignItems:"center", gap:6, padding:"4px 10px", background: isMe?"rgba(59,130,246,0.12)":"var(--card)", border:`1px solid ${isMe?"rgba(59,130,246,0.4)":"var(--border)"}`, borderRadius:20 }}>
+                                      <div style={{ width:20, height:20, borderRadius:"50%", background: isMe?"var(--accent)":"var(--border)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:10, fontWeight:800, color:"white", flexShrink:0 }}>
+                                        {m.name?.[0]?.toUpperCase()||"?"}
+                                      </div>
+                                      <span style={{ fontSize:12, fontWeight: isMe?700:500, color: isMe?"var(--accent)":"var(--text)" }}>
+                                        {m.name}{isMe?" (tú)":""}
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                          {cached === undefined && (
+                            <div style={{ borderTop:"1px solid var(--border)", padding:"8px 16px", fontSize:11, color:"var(--text-muted)" }}>
+                              ⏳ Cargando miembros...
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
-                ))}
-              </div>
+                )}
+
+                {/* Create */}
+                <div style={{ background:"var(--input-bg)", border:"1px solid var(--border)", borderRadius:12, padding:16, marginBottom:14 }}>
+                  <div style={{ fontSize:13, fontWeight:700, marginBottom:10 }}>🆕 Crear team</div>
+                  <div style={{ display:"flex", gap:8 }}>
+                    <input className="input" placeholder="Nombre del team..." value={createName} onChange={e=>setCreateName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&createTeam()} style={{ flex:1 }} />
+                    <button className="btn-primary" style={{ fontSize:14, padding:"10px 16px", whiteSpace:"nowrap" }} onClick={createTeam}>Crear</button>
+                  </div>
+                </div>
+
+                {/* Join */}
+                <div style={{ background:"var(--input-bg)", border:"1px solid var(--border)", borderRadius:12, padding:16 }}>
+                  <div style={{ fontSize:13, fontWeight:700, marginBottom:10 }}>🔗 Unirse a un team</div>
+                  <div style={{ display:"flex", gap:8 }}>
+                    <input
+                      className="input"
+                      placeholder="Código (ej: ABC123)"
+                      value={joinCode}
+                      onChange={e => {
+                        const v = e.target.value.toUpperCase();
+                        setJoinCode(v);
+                        setJoinPreview(null);
+                        setErr("");
+                        if (v.length >= 4) previewJoin(v);
+                      }}
+                      onKeyDown={e => e.key === "Enter" && (joinPreview ? joinTeam() : previewJoin(joinCode))}
+                      style={{ flex:1, fontFamily:"monospace", letterSpacing:3, fontSize:16 }}
+                      maxLength={6}
+                    />
+                    {!joinPreview
+                      ? <button className="btn-ghost" style={{ whiteSpace:"nowrap" }} onClick={() => previewJoin(joinCode)} disabled={joinPreviewing}>
+                          {joinPreviewing ? "⏳" : "🔍 Buscar"}
+                        </button>
+                      : <button className="btn-primary" style={{ fontSize:14, padding:"10px 16px", whiteSpace:"nowrap" }} onClick={joinTeam} disabled={loading}>
+                          {loading ? "⏳" : "✅ Unirse"}
+                        </button>
+                    }
+                  </div>
+
+                  {/* Preview card */}
+                  {joinPreviewing && (
+                    <div style={{ marginTop:12, padding:"12px 14px", background:"var(--card)", borderRadius:10, border:"1px solid var(--border)", fontSize:13, color:"var(--text-muted)", display:"flex", alignItems:"center", gap:8 }}>
+                      <span>⏳</span> Buscando equipo...
+                    </div>
+                  )}
+
+                  {joinPreview && !joinPreviewing && (
+                    <div style={{ marginTop:12, background:"rgba(34,197,94,0.05)", border:"1px solid rgba(34,197,94,0.3)", borderRadius:12, padding:"14px 16px" }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:12 }}>
+                        <span style={{ fontSize:24 }}>🏟️</span>
+                        <div>
+                          <div style={{ fontWeight:800, fontSize:17 }}>{joinPreview.name}</div>
+                          <div style={{ fontSize:11, color:"var(--text-muted)" }}>
+                            Creado por {joinPreview.createdBy} · {Object.keys(joinPreview.members||{}).length} miembro{Object.keys(joinPreview.members||{}).length!==1?"s":""}
+                          </div>
+                        </div>
+                      </div>
+                      <div style={{ fontSize:10, fontWeight:700, letterSpacing:1, color:"var(--text-muted)", textTransform:"uppercase", marginBottom:8 }}>Miembros actuales</div>
+                      <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                        {Object.values(joinPreview.members||{}).map(m => (
+                          <div key={m.email} style={{ display:"flex", alignItems:"center", gap:6, padding:"5px 12px", background:"var(--card)", border:"1px solid var(--border)", borderRadius:20 }}>
+                            <div style={{ width:22, height:22, borderRadius:"50%", background:"var(--border)", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:800, fontSize:11, color:"white", flexShrink:0 }}>
+                              {m.name?.[0]?.toUpperCase()||"?"}
+                            </div>
+                            <div>
+                              <div style={{ fontSize:12, fontWeight:600 }}>{m.name}</div>
+                              <div style={{ fontSize:10, color:"var(--text-muted)" }}>{m.sessions} ses · {m.volume}t</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {joinCode.length >= 4 && !joinPreview && !joinPreviewing && !err && (
+                    <div style={{ marginTop:10, fontSize:12, color:"var(--text-muted)", textAlign:"center" }}>
+                      No se encontró ningún equipo con ese código.
+                    </div>
+                  )}
+                </div>
+                {err && <div className="err-msg" style={{ marginTop:10 }}>{err}</div>}
+              </>
             )}
-
-            {/* Create */}
-            <div style={{ background:"var(--input-bg)", border:"1px solid var(--border)", borderRadius:12, padding:16, marginBottom:14 }}>
-              <div style={{ fontSize:13, fontWeight:700, marginBottom:10 }}>🆕 Crear team</div>
-              <div style={{ display:"flex", gap:8 }}>
-                <input className="input" placeholder="Nombre del team..." value={createName} onChange={e=>setCreateName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&createTeam()} style={{ flex:1 }} />
-                <button className="btn-primary" style={{ fontSize:14, padding:"10px 16px", whiteSpace:"nowrap" }} onClick={createTeam}>Crear</button>
-              </div>
-            </div>
-
-            {/* Join */}
-            <div style={{ background:"var(--input-bg)", border:"1px solid var(--border)", borderRadius:12, padding:16 }}>
-              <div style={{ fontSize:13, fontWeight:700, marginBottom:10 }}>🔗 Unirse a un team</div>
-              <div style={{ display:"flex", gap:8 }}>
-                <input className="input" placeholder="Código (ej: ABC123)" value={joinCode} onChange={e=>setJoinCode(e.target.value.toUpperCase())} onKeyDown={e=>e.key==="Enter"&&joinTeam()} style={{ flex:1, fontFamily:"monospace", letterSpacing:2 }} maxLength={6} />
-                <button className="btn-primary" style={{ fontSize:14, padding:"10px 16px", whiteSpace:"nowrap" }} onClick={joinTeam}>{loading?"...":"Unirse"}</button>
-              </div>
-            </div>
-            {err && <div className="err-msg" style={{ marginTop:10 }}>{err}</div>}
           </div>
         )}
 
         {tab === "team" && activeTeam && (
           <div>
-            <button className="btn-ghost small" style={{ marginBottom:16 }} onClick={() => setTab("home")}>← Volver</button>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:8, marginBottom:4 }}>
-              <div>
-                <div style={{ fontFamily:"Barlow Condensed, sans-serif", fontSize:24, fontWeight:800 }}>{activeTeam.name}</div>
-                <div style={{ fontSize:12, color:"var(--text-muted)", fontFamily:"monospace" }}>Código: <b style={{ color:"var(--accent)", letterSpacing:2 }}>{activeTeam.code}</b> · Comparte este código para invitar</div>
+            {/* Header con volver + acciones */}
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16, flexWrap:"wrap", gap:8 }}>
+              <button className="btn-ghost small" onClick={() => setTab("home")}>← Volver</button>
+              <div style={{ display:"flex", gap:8 }}>
+                <button className="btn-ghost small" onClick={syncStats} disabled={loading}>{loading?"⏳":"🔄 Mis stats"}</button>
+                <button className="btn-ghost small" onClick={() => loadTeam(activeTeam.code)} disabled={loading}>↺</button>
+                <button className="btn-ghost small danger" onClick={() => leaveTeam(activeTeam.code)}>🚪 Salir</button>
               </div>
-              <button className="btn-ghost small" onClick={syncStats}>{loading?"Actualizando...":"🔄 Actualizar mis stats"}</button>
             </div>
 
-            {/* Metric selector */}
-            <div style={{ display:"flex", gap:6, margin:"16px 0", flexWrap:"wrap" }}>
-              {[["volume","🏋️ Volumen (t)"],["sessions","📋 Sesiones"],["prs","🏆 PRs"],["streak","🔥 Racha"]].map(([m,l])=>(
-                <button key={m} className={`muscle-chip ${rankMetric===m?"active":""}`} onClick={()=>setRankMetric(m)}>{l}</button>
-              ))}
+            {/* Team header */}
+            <div style={{ background:"rgba(59,130,246,0.07)", border:"1px solid rgba(59,130,246,0.2)", borderRadius:14, padding:"14px 18px", marginBottom:16 }}>
+              <div style={{ fontFamily:"Barlow Condensed, sans-serif", fontSize:26, fontWeight:800 }}>{activeTeam.name}</div>
+              <div style={{ fontSize:12, color:"var(--text-muted)", marginTop:4 }}>
+                Código para invitar:{" "}
+                <span style={{ background:"var(--accent-dim)", color:"var(--accent)", fontFamily:"monospace", fontWeight:800, letterSpacing:3, padding:"2px 10px", borderRadius:6, fontSize:14 }}>{activeTeam.code}</span>
+                {" "}· {members.length} miembro{members.length!==1?"s":""}
+              </div>
             </div>
 
-            {loading && <div style={{ textAlign:"center", color:"var(--text-muted)", padding:20 }}>Cargando ranking...</div>}
-            
-            {!loading && sorted.length > 0 && (
-              <div>
-                {sorted.map((m, i) => {
-                  const isMe = m.email === user.email;
-                  const val = rankMetric==="volume"?`${m.volume}t`:rankMetric==="sessions"?`${m.sessions} ses.`:rankMetric==="prs"?`${m.prs} PRs`:`${m.streak} días`;
-                  return (
-                    <div key={m.email} style={{ display:"flex", alignItems:"center", gap:14, padding:"14px 16px", background: isMe?"rgba(59,130,246,0.08)":"var(--input-bg)", border:`1px solid ${isMe?"rgba(59,130,246,0.35)":"var(--border)"}`, borderRadius:12, marginBottom:8, transition:"all 0.2s" }}>
-                      <div style={{ width:36, height:36, borderRadius:"50%", background: i<3?"transparent":"var(--border)", display:"flex", alignItems:"center", justifyContent:"center", fontSize: i<3?28:14, fontWeight:800, color:"var(--text-muted)", flexShrink:0 }}>
-                        {i < 3 ? medals[i] : i+1}
+            {loading && <div style={{ textAlign:"center", padding:"30px 0", color:"var(--text-muted)" }}>⏳ Cargando...</div>}
+
+            {!loading && (
+              <>
+                {/* ── CAMPEÓN SEMANAL ── */}
+                {weeklyChamp && (
+                  <div style={{ background:"linear-gradient(135deg,rgba(251,191,36,0.12),rgba(245,158,11,0.06))", border:"2px solid rgba(251,191,36,0.45)", borderRadius:16, padding:"16px 18px", marginBottom:18, position:"relative", overflow:"hidden" }}>
+                    <div style={{ position:"absolute", top:-20, right:-20, width:100, height:100, borderRadius:"50%", background:"rgba(251,191,36,0.08)", pointerEvents:"none" }} />
+                    <div style={{ fontSize:10, fontWeight:700, letterSpacing:2, color:"#f59e0b", textTransform:"uppercase", marginBottom:10 }}>👑 Campeón de la semana</div>
+                    <div style={{ display:"flex", alignItems:"center", gap:14 }}>
+                      <div style={{ width:52, height:52, borderRadius:"50%", background:"linear-gradient(135deg,#f59e0b,#f97316)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:22, fontWeight:900, color:"white", flexShrink:0, boxShadow:"0 4px 16px rgba(245,158,11,0.4)" }}>
+                        {weeklyChamp.name?.[0]?.toUpperCase()||"?"}
                       </div>
-                      <div style={{ width:36, height:36, borderRadius:"50%", background: isMe?"var(--accent)":"var(--border)", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:800, fontSize:15, color:"white", flexShrink:0 }}>
-                        {m.name?.[0]?.toUpperCase()||"?"}
-                      </div>
-                      <div style={{ flex:1, minWidth:0 }}>
-                        <div style={{ fontWeight:700, fontSize:14 }}>{m.name} {isMe&&<span style={{ fontSize:10, color:"var(--accent)", fontWeight:700 }}>(tú)</span>}</div>
-                        <div style={{ fontSize:11, color:"var(--text-muted)" }}>
-                          {m.sessions} ses · {m.volume}t · {m.prs} PRs · {m.streak}d racha
+                      <div style={{ flex:1 }}>
+                        <div style={{ fontFamily:"Barlow Condensed, sans-serif", fontSize:22, fontWeight:800 }}>
+                          {weeklyChamp.name}
+                          {weeklyChamp.email === user.email && <span style={{ fontSize:12, color:"#f59e0b", marginLeft:8 }}>¡Eres tú! 🔥</span>}
                         </div>
+                        {(weeklyChamp.weeklyProgress||0) > 0 ? (
+                          <div style={{ fontSize:13, color:"#fbbf24", marginTop:2 }}>
+                            Subió <b style={{ fontSize:16 }}>+{weeklyChamp.weeklyProgress}%</b> su fuerza esta semana
+                            {weeklyChamp.bestImprovement && <span style={{ color:"var(--text-muted)", fontSize:11 }}> · mejor en {weeklyChamp.bestImprovement.name} (+{weeklyChamp.bestImprovement.pct}%)</span>}
+                          </div>
+                        ) : (
+                          <div style={{ fontSize:13, color:"#fbbf24" }}>
+                            {weeklyChamp.thisWeekSessions||0} sesiones esta semana 💪
+                          </div>
+                        )}
                       </div>
-                      <div style={{ fontFamily:"Barlow Condensed, sans-serif", fontSize:22, fontWeight:800, color: i===0?"#f59e0b":i===1?"#94a3b8":i===2?"#b45309":"var(--text)" }}>{val}</div>
+                      <div style={{ fontFamily:"Barlow Condensed, sans-serif", fontSize:36, fontWeight:900, color:"#f59e0b", flexShrink:0 }}>
+                        {(weeklyChamp.weeklyProgress||0) > 0 ? `+${weeklyChamp.weeklyProgress}%` : `${weeklyChamp.thisWeekSessions||0} 🏋️`}
+                      </div>
                     </div>
-                  );
-                })}
-              </div>
+                    <div style={{ marginTop:12, fontSize:11, color:"rgba(251,191,36,0.7)", lineHeight:1.5 }}>
+                      ⚡ Basado en mejora de 1RM relativa a tu propio peso corporal esta semana vs la anterior
+                    </div>
+                  </div>
+                )}
+
+                {/* ── MIEMBROS ── */}
+                <div style={{ marginBottom:18 }}>
+                  <div style={{ fontSize:10, fontWeight:700, letterSpacing:2, color:"var(--text-muted)", textTransform:"uppercase", marginBottom:10 }}>
+                    👥 Miembros ({members.length})
+                  </div>
+                  <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                    {members.map(m => {
+                      const isMe = m.email === user.email;
+                      const isChamp = weeklyChamp?.email === m.email;
+                      return (
+                        <div key={m.email} style={{ display:"flex", alignItems:"center", gap:8, padding:"7px 12px", background: isChamp?"rgba(251,191,36,0.08)":isMe?"rgba(59,130,246,0.1)":"var(--input-bg)", border:`1px solid ${isChamp?"rgba(251,191,36,0.4)":isMe?"rgba(59,130,246,0.4)":"var(--border)"}`, borderRadius:24 }}>
+                          <div style={{ width:24, height:24, borderRadius:"50%", background: isMe?"var(--accent)":"var(--border)", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:800, fontSize:11, color:"white", flexShrink:0 }}>
+                            {m.name?.[0]?.toUpperCase()||"?"}
+                          </div>
+                          <span style={{ fontSize:12, fontWeight: isMe?700:500 }}>
+                            {isChamp?"👑 ":""}{m.name}{isMe?" (tú)":""}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {members.length === 0 && <p style={{ fontSize:13, color:"var(--text-muted)" }}>Solo tú. ¡Comparte el código!</p>}
+                  </div>
+                </div>
+
+                {/* ── RANKING ── */}
+                {members.length > 0 && (
+                  <>
+                    <div style={{ fontSize:10, fontWeight:700, letterSpacing:2, color:"var(--text-muted)", textTransform:"uppercase", marginBottom:10 }}>🏆 Ranking</div>
+                    <div style={{ display:"flex", gap:6, marginBottom:14, flexWrap:"wrap" }}>
+                      {[
+                        ["progress","📈 Progreso %"],
+                        ["volume","🏋️ Volumen"],
+                        ["sessions","📋 Sesiones"],
+                        ["prs","⭐ PRs"],
+                        ["streak","🔥 Racha"],
+                      ].map(([m,l])=>(
+                        <button key={m} className={`muscle-chip ${rankMetric===m?"active":""}`} onClick={()=>setRankMetric(m)}>{l}</button>
+                      ))}
+                    </div>
+
+                    {rankMetric === "progress" && (
+                      <div style={{ background:"rgba(59,130,246,0.05)", border:"1px solid rgba(59,130,246,0.15)", borderRadius:10, padding:"10px 14px", marginBottom:12, fontSize:12, color:"var(--text-muted)", lineHeight:1.6 }}>
+                        📊 <b>Progreso relativo</b>: mejora promedio de 1RM esta semana vs la anterior, normalizada por tu propio nivel. Así alguien que sube de 60→63 kg compite igual que alguien que sube de 100→105 kg.
+                      </div>
+                    )}
+
+                    {sorted.map((m, i) => {
+                      const isMe = m.email === user.email;
+                      const isChamp = weeklyChamp?.email === m.email && rankMetric === "progress";
+                      const medals = ["🥇","🥈","🥉"];
+
+                      let val, myVal, maxVal;
+                      if (rankMetric === "progress") {
+                        val = (m.weeklyProgress||0) > 0 ? `+${m.weeklyProgress}%` : (m.thisWeekSessions||0) > 0 ? `${m.thisWeekSessions} ses.` : "—";
+                        myVal = m.weeklyProgress||0;
+                        maxVal = Math.max(...sorted.map(x => x.weeklyProgress||0), 0.1);
+                      } else if (rankMetric === "volume") {
+                        val = `${m.volume}t`; myVal = m.volume; maxVal = Math.max(...sorted.map(x=>x.volume),0.1);
+                      } else if (rankMetric === "sessions") {
+                        val = `${m.sessions} ses.`; myVal = m.sessions; maxVal = Math.max(...sorted.map(x=>x.sessions),1);
+                      } else if (rankMetric === "prs") {
+                        val = `${m.prs} PRs`; myVal = m.prs; maxVal = Math.max(...sorted.map(x=>x.prs),1);
+                      } else {
+                        val = `${m.streak}d`; myVal = m.streak; maxVal = Math.max(...sorted.map(x=>x.streak),1);
+                      }
+                      const barPct = maxVal > 0 ? Math.min((myVal/maxVal)*100, 100) : 0;
+                      const barColor = i===0?"#f59e0b":i===1?"#94a3b8":i===2?"#b45309":isMe?"var(--accent)":"#475569";
+
+                      return (
+                        <div key={m.email} style={{ padding:"12px 14px", background: isChamp?"rgba(251,191,36,0.06)":isMe?"rgba(59,130,246,0.08)":"var(--input-bg)", border:`2px solid ${isChamp?"rgba(251,191,36,0.45)":isMe?"var(--accent)":"var(--border)"}`, borderRadius:12, marginBottom:8 }}>
+                          <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:6 }}>
+                            <div style={{ width:30, height:30, display:"flex", alignItems:"center", justifyContent:"center", fontSize: i<3?20:12, fontWeight:800, flexShrink:0 }}>
+                              {i < 3 ? medals[i] : <span style={{ color:"var(--text-muted)" }}>#{i+1}</span>}
+                            </div>
+                            <div style={{ width:34, height:34, borderRadius:"50%", background: isMe?"var(--accent)":"var(--border)", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:800, fontSize:14, color:"white", flexShrink:0 }}>
+                              {m.name?.[0]?.toUpperCase()||"?"}
+                            </div>
+                            <div style={{ flex:1, minWidth:0 }}>
+                              <div style={{ fontWeight:700, fontSize:13, display:"flex", alignItems:"center", gap:6, flexWrap:"wrap" }}>
+                                {isChamp && "👑 "}{m.name}
+                                {isMe && <span style={{ fontSize:10, background:"var(--accent)", color:"white", borderRadius:5, padding:"1px 6px" }}>TÚ</span>}
+                              </div>
+                              <div style={{ fontSize:11, color:"var(--text-muted)", marginTop:2 }}>
+                                {m.sessions} ses · {m.volume}t · {m.prs} PRs · {m.streak}d
+                                {rankMetric==="progress" && m.bestImprovement && (
+                                  <span style={{ color:"#22c55e" }}> · 🏋️ {m.bestImprovement.name} +{m.bestImprovement.pct}%</span>
+                                )}
+                              </div>
+                            </div>
+                            <div style={{ fontFamily:"Barlow Condensed, sans-serif", fontSize:22, fontWeight:800, color: i===0?"#f59e0b":i===1?"#94a3b8":i===2?"#b45309":isMe?"var(--accent)":"var(--text)", flexShrink:0 }}>
+                              {val}
+                            </div>
+                          </div>
+                          <div style={{ background:"var(--border)", borderRadius:4, height:4, overflow:"hidden" }}>
+                            <div style={{ height:"100%", background:barColor, width:`${barPct}%`, borderRadius:4, transition:"width 0.6s ease" }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
+
+                <p style={{ fontSize:11, color:"var(--text-muted)", textAlign:"center", marginTop:14 }}>
+                  💡 Pulsa "🔄 Mis stats" para actualizar tu posición.
+                </p>
+              </>
             )}
-            {!loading && sorted.length === 0 && <p style={{ color:"var(--text-muted)", textAlign:"center", padding:20 }}>Sin miembros aún.</p>}
           </div>
         )}
       </div>
@@ -2503,7 +2837,7 @@ function GymApp() {
               const pct = Math.min(thisWeek / weeklyGoal.target, 1);
               const done = pct >= 1;
               return (
-                <div style={{ background: done?"rgba(34,197,94,0.08)":"rgba(59,130,246,0.06)", border:`1px solid ${done?"rgba(34,197,94,0.3)":"rgba(59,130,246,0.2)"}`, borderRadius:12, padding:"10px 16px", marginBottom:16 }} onClick={() => setShowWeeklyGoal(true)} role="button" style={{ cursor:"pointer", background: done?"rgba(34,197,94,0.08)":"rgba(59,130,246,0.06)", border:`1px solid ${done?"rgba(34,197,94,0.3)":"rgba(59,130,246,0.2)"}`, borderRadius:12, padding:"10px 16px", marginBottom:16 }}>
+                <div onClick={() => setShowWeeklyGoal(true)} style={{ cursor:"pointer", background: done?"rgba(34,197,94,0.08)":"rgba(59,130,246,0.06)", border:`1px solid ${done?"rgba(34,197,94,0.3)":"rgba(59,130,246,0.2)"}`, borderRadius:12, padding:"10px 16px", marginBottom:16 }}>
                   <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginBottom:6 }}>
                     <span style={{ fontWeight:600 }}>🎯 Meta semanal {done?"✅":""}</span>
                     <span style={{ color:"var(--text-muted)" }}>{thisWeek}/{weeklyGoal.target} sesiones</span>
