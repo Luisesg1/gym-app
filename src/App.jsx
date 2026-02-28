@@ -2398,7 +2398,6 @@ async function getAthleteData(athleteUid) {
 
 async function joinCoachByCode(athleteUid, athleteName, athleteEmail, code) {
   try {
-    const { query, where } = await import("firebase/firestore");
     const q = query(collection(db, "coaches"), where("code", "==", code));
     const coachesSnap = await getDocs(q);
     if (coachesSnap.empty) return { ok: false, msg: "Código de coach no encontrado" };
