@@ -1,8 +1,7 @@
 import { useState, useEffect, useRef, createContext, useContext } from "react";
 import { initializeApp, getApps } from "firebase/app";
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail, updateProfile } from "firebase/auth";
-import { getFirestore, doc, getDoc, setDoc, serverTimestamp, collection, getDocs, deleteDoc } from "firebase/firestore";
-
+import { getFirestore, doc, getDoc, setDoc, serverTimestamp, collection, getDocs, deleteDoc, query, where } from "firebase/firestore";
 const firebaseConfig = {
   apiKey: "AIzaSyAh3pfGv0vEpKmGtNKKRvAhma1pGtA7Alc",
   authDomain: "gymtracker-app-2c603.firebaseapp.com",
@@ -2399,9 +2398,11 @@ async function getAthleteData(athleteUid) {
 
 async function joinCoachByCode(athleteUid, athleteName, athleteEmail, code) {
   try {
-    const coachesSnap = await getDocs(collection(db, "coaches"));
-    const coachDoc = coachesSnap.docs.find(d => d.data().code === code);
-    if (!coachDoc) return { ok: false, msg: "Código de coach no encontrado" };
+    const { query, where } = await import("firebase/firestore");
+    const q = query(collection(db, "coaches"), where("code", "==", code));
+    const coachesSnap = await getDocs(q);
+    if (coachesSnap.empty) return { ok: false, msg: "Código de coach no encontrado" };
+    const coachDoc = coachesSnap.docs[0];
     const coachData = coachDoc.data();
 
     // Add athlete to coach
